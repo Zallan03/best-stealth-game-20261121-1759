@@ -43,9 +43,8 @@ async function main(): Promise<void> {
     game_path_max_bytes: 1000,
   };
 
-  // NOTE (coordinator fix): this kit's buildDossier takes (outputDir, options) —
-  // the starter's call form. Passing the options object alone made the
-  // library read limits off undefined (TypeError: text_max_bytes).
+  // This kit's vendor lib takes buildDossier(outputDir, options) — the output
+  // dir comes first, then the entry options object.
   const dossier = await buildDossier(outputDir, {
     title: "Lantern Fox — Steal the Moon-Pearl",
     name: "Lantern Fox — Steal the Moon-Pearl",
@@ -72,17 +71,10 @@ async function main(): Promise<void> {
     game_path_max_bytes: limits.game_path_max_bytes,
   });
 
-  // buildDossier returns the dossier bytes as a Buffer (not a string):
-  // write those bytes verbatim. JSON.stringify on a Buffer would emit a
-  // {"0": 123, ...} numeric-key object instead of the dossier itself.
+  // buildDossier returns the dossier as canonical JSON bytes (a Buffer), so
+  // write those bytes verbatim instead of stringifying them.
   const dossierPath = path.join(outputDir, "dossier.json");
-  if (typeof dossier === "string") {
-    await writeFile(dossierPath, dossier, "utf8");
-  } else if (dossier instanceof Uint8Array) {
-    await writeFile(dossierPath, dossier);
-  } else {
-    await writeFile(dossierPath, `${JSON.stringify(dossier, null, 2)}\n`, "utf8");
-  }
+  await writeFile(dossierPath, dossier);
   console.log(`Wrote ${dossierPath}`);
 }
 
