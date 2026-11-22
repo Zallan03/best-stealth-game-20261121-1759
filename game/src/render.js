@@ -1,549 +1,491 @@
+// Lantern Fox renderer — everything is drawn with Canvas 2D, no external assets.
+// Draws the moonlit garden, the patrolling keepers, the fox, and the HUD.
 import { CONFIG, COLORS } from './config.js';
-import { clamp, distance, hasLineOfSight } from './world.js';
 
-function roundRect(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w / 2, h / 2);
+const TAU = Math.PI * 2;
+
+function fmtTime(t) {
+  const s = Math.max(0, Math.floor(t || 0));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return String(m).padStart(2, '0') + ':' + String(r).padStart(2, '0');
+}
+
+function hexA(hex, alpha) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 255;
+  const g = (n >> 8) & 255;
+  const b = n & 255;
+  return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
   ctx.beginPath();
   ctx.moveTo(x + rr, y);
-  ctx.lineTo(x + w - rr, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
-  ctx.lineTo(x + w, y + h - rr);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
-  ctx.lineTo(x + rr, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
-  ctx.lineTo(x, y + rr);
-  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
   ctx.closePath();
 }
 
-function formatTime(seconds) {
-  const total = Math.max(0, Math.floor(seconds));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+function drawBackground(ctx) {
+  const g = ctx.createLinearGradient(0, 0, 0, CONFIG.height);
+  g.addColorStop(0, '#0a1a2c');
+  g.addColorStop(0.55, '#0a2030');
+  g.addColorStop(1, '#071018');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
+  // Faint moon glow in the upper right.
+  const glow = ctx.createRadialGradient(830, 90, 8, 830, 90, 190);
+  glow.addColorStop(0, 'rgba(190, 227, 255, 0.20)');
+  glow.addColorStop(1, 'rgba(190, 227, 255, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(620, 0, 340, 300);
+  // Subtle ground grid.
+  ctx.strokeStyle = 'rgba(125, 211, 252, 0.05)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x = 40; x < CONFIG.width; x += 40) {
+    ctx.moveTo(x, CONFIG.hudHeight);
+    ctx.lineTo(x, CONFIG.height);
+  }
+  for (let y = CONFIG.hudHeight + 40; y < CONFIG.height; y += 40) {
+    ctx.moveTo(0, y);
+    ctx.lineTo(CONFIG.width, y);
+  }
+  ctx.stroke();
 }
 
-function drawFloor(ctx, world) {
-  const grad = ctx.createLinearGradient(0, CONFIG.hudHeight, 0, CONFIG.height);
-  grad.addColorStop(0, '#0d2b2a');
-  grad.addColorStop(0.55, '#0a2433');
-  grad.addColorStop(1, '#071826');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, CONFIG.hudHeight, CONFIG.width, CONFIG.height - CONFIG.hudHeight);
-
-  ctx.fillStyle = 'rgba(125, 211, 252, 0.065)';
-  ctx.fillRect(32, 76, 896, 44);
-  ctx.fillRect(32, 196, 896, 44);
-  ctx.fillRect(32, 411, 896, 34);
-  ctx.fillRect(32, 542, 896, 52);
-  ctx.fillRect(58, 66, 38, 540);
-  ctx.fillRect(256, 196, 38, 240);
-  ctx.fillRect(678, 76, 38, 360);
-  ctx.fillRect(864, 66, 48, 500);
-  ctx.strokeStyle = 'rgba(219, 234, 254, 0.045)';
-  ctx.lineWidth = 1;
-  for (let x = 32; x <= 928; x += 40) {
-    ctx.beginPath(); ctx.moveTo(x, 66); ctx.lineTo(x, 606); ctx.stroke();
+function drawDecor(ctx, world) {
+  // Grass tufts.
+  ctx.strokeStyle = 'rgba(74, 222, 128, 0.30)';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  for (const t of world.decor.grass) {
+    const x = t.x;
+    const y = t.y;
+    const s = t.s;
+    ctx.moveTo(x - s, y);
+    ctx.lineTo(x - s * 0.4, y - s * 1.6);
+    ctx.moveTo(x, y);
+    ctx.lineTo(x, y - s * 1.9);
+    ctx.moveTo(x + s, y);
+    ctx.lineTo(x + s * 0.4, y - s * 1.6);
   }
-  for (let y = 66; y <= 606; y += 40) {
-    ctx.beginPath(); ctx.moveTo(32, y); ctx.lineTo(928, y); ctx.stroke();
-  }
-
-  for (const g of world.decor.grass) {
-    ctx.save();
-    ctx.translate(g.x, g.y);
-    ctx.rotate(g.a);
-    ctx.strokeStyle = 'rgba(74, 222, 128, 0.28)';
-    ctx.lineWidth = 1.2;
-    ctx.beginPath();
-    ctx.moveTo(-g.s, 0); ctx.lineTo(0, -g.s); ctx.lineTo(g.s, 0);
-    ctx.stroke();
-    ctx.restore();
-  }
-  for (const p of world.decor.pebbles) {
-    ctx.fillStyle = 'rgba(226, 232, 240, 0.20)';
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.s, 0, Math.PI * 2); ctx.fill();
-  }
+  ctx.stroke();
+  // Flowers.
   for (const f of world.decor.flowers) {
     ctx.fillStyle = f.c;
-    for (let i = 0; i < 5; i += 1) {
-      const a = (i / 5) * Math.PI * 2;
-      ctx.beginPath();
-      ctx.arc(f.x + Math.cos(a) * f.s, f.y + Math.sin(a) * f.s, f.s * 0.72, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.fillStyle = '#fef3c7';
-    ctx.beginPath(); ctx.arc(f.x, f.y, 1.25, 0, Math.PI * 2); ctx.fill();
-  }
-}
-
-function drawLanternGlow(ctx, world) {
-  for (const l of world.lanterns) {
-    const glow = ctx.createRadialGradient(l.x, l.y, 2, l.x, l.y, 58);
-    glow.addColorStop(0, 'rgba(252, 211, 77, 0.34)');
-    glow.addColorStop(0.35, 'rgba(251, 146, 60, 0.13)');
-    glow.addColorStop(1, 'rgba(251, 146, 60, 0)');
-    ctx.fillStyle = glow;
-    ctx.beginPath(); ctx.arc(l.x, l.y, 58, 0, Math.PI * 2); ctx.fill();
-  }
-}
-
-function drawSolid(ctx, s) {
-  ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.35)';
-  ctx.shadowBlur = 5;
-  ctx.shadowOffsetY = 3;
-  if (s.kind === 'crate') {
-    ctx.fillStyle = '#8a5a2b';
-    roundRect(ctx, s.x, s.y, s.w, s.h, 4); ctx.fill();
-    ctx.shadowColor = 'transparent';
-    ctx.strokeStyle = '#5f3a17'; ctx.lineWidth = 2;
-    roundRect(ctx, s.x + 2, s.y + 2, s.w - 4, s.h - 4, 3); ctx.stroke();
+    ctx.globalAlpha = 0.85;
     ctx.beginPath();
-    ctx.moveTo(s.x + 4, s.y + 4); ctx.lineTo(s.x + s.w - 4, s.y + s.h - 4);
-    ctx.moveTo(s.x + s.w - 4, s.y + 4); ctx.lineTo(s.x + 4, s.y + s.h - 4);
-    ctx.stroke();
-    ctx.fillStyle = 'rgba(254, 215, 170, 0.35)';
-    ctx.fillRect(s.x + 4, s.y + 4, s.w - 8, 3);
-  } else if (s.kind === 'hedge') {
-    ctx.fillStyle = '#14532d';
-    roundRect(ctx, s.x, s.y, s.w, s.h, 8); ctx.fill();
-    ctx.shadowColor = 'transparent';
-    ctx.fillStyle = '#22c55e';
-    const n = Math.max(3, Math.floor((s.w + s.h) / 18));
-    for (let i = 0; i < n; i += 1) {
-      const t = n === 1 ? 0.5 : i / (n - 1);
-      const cx = s.w >= s.h ? s.x + 8 + t * (s.w - 16) : s.x + s.w / 2;
-      const cy = s.w >= s.h ? s.y + s.h / 2 : s.y + 8 + t * (s.h - 16);
-      ctx.globalAlpha = 0.35;
-      ctx.beginPath(); ctx.arc(cx, cy, 7, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = '#052e16'; ctx.lineWidth = 2;
-    roundRect(ctx, s.x, s.y, s.w, s.h, 8); ctx.stroke();
-  } else {
-    ctx.fillStyle = '#365a78';
-    roundRect(ctx, s.x, s.y, s.w, s.h, 4); ctx.fill();
-    ctx.shadowColor = 'transparent';
-    ctx.fillStyle = '#466e91';
-    ctx.fillRect(s.x + 3, s.y + 3, Math.max(0, s.w - 6), 4);
-    ctx.strokeStyle = '#162c42'; ctx.lineWidth = 2;
-    roundRect(ctx, s.x, s.y, s.w, s.h, 4); ctx.stroke();
+    ctx.arc(f.x, f.y, f.s, 0, TAU);
+    ctx.fill();
   }
-  ctx.strokeStyle = 'rgba(219,234,254,0.16)';
-  ctx.lineWidth = 1;
-  if (s.w > s.h) {
-    for (let x = s.x + 28; x < s.x + s.w - 6; x += 30) {
-      ctx.beginPath(); ctx.moveTo(x, s.y + 3); ctx.lineTo(x, s.y + s.h - 3); ctx.stroke();
-    }
-  } else {
-    for (let y = s.y + 28; y < s.y + s.h - 6; y += 30) {
-      ctx.beginPath(); ctx.moveTo(s.x + 3, y); ctx.lineTo(s.x + s.w - 3, y); ctx.stroke();
+  ctx.globalAlpha = 1;
+  // Pebbles.
+  ctx.fillStyle = 'rgba(148, 163, 184, 0.5)';
+  for (const p of world.decor.pebbles) {
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y, p.s, p.s * 0.65, 0.6, 0, TAU);
+    ctx.fill();
+  }
+}
+
+function drawSolids(ctx, world) {
+  for (const s of world.solids) {
+    if (s.kind === 'wall') {
+      ctx.fillStyle = '#1e3a52';
+      ctx.fillRect(s.x, s.y, s.w, s.h);
+      ctx.fillStyle = '#2b4a67';
+      ctx.fillRect(s.x, s.y, s.w, 3);
+      ctx.strokeStyle = 'rgba(125, 211, 252, 0.18)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(s.x + 0.5, s.y + 0.5, s.w - 1, s.h - 1);
+    } else if (s.kind === 'hedge') {
+      ctx.fillStyle = '#14532d';
+      roundRectPath(ctx, s.x, s.y, s.w, s.h, 6);
+      ctx.fill();
+      ctx.fillStyle = '#16a34a';
+      ctx.beginPath();
+      const step = 14;
+      for (let x = s.x + 7; x < s.x + s.w; x += step) {
+        ctx.arc(x, s.y + s.h / 2, 4, 0, TAU);
+      }
+      ctx.fill();
+    } else {
+      // Crate.
+      ctx.fillStyle = '#7c4a21';
+      ctx.fillRect(s.x, s.y, s.w, s.h);
+      ctx.fillStyle = '#92400e';
+      ctx.fillRect(s.x + 3, s.y + 3, s.w - 6, s.h - 6);
+      ctx.strokeStyle = '#451a03';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(s.x + 4, s.y + 4);
+      ctx.lineTo(s.x + s.w - 4, s.y + s.h - 4);
+      ctx.moveTo(s.x + s.w - 4, s.y + 4);
+      ctx.lineTo(s.x + 4, s.y + s.h - 4);
+      ctx.stroke();
     }
   }
-  ctx.restore();
 }
 
 function drawBushes(ctx, world) {
   for (const b of world.bushes) {
-    ctx.save();
-    ctx.shadowColor = 'rgba(0,0,0,0.30)';
-    ctx.shadowBlur = 7;
-    ctx.shadowOffsetY = 3;
-    const blobs = [[0, 0, 1], [-17, 5, 0.72], [17, 6, 0.75], [-8, -12, 0.68], [11, -11, 0.7], [0, 13, 0.78]];
-    for (const [ox, oy, scale] of blobs) {
-      ctx.fillStyle = '#166534';
-      ctx.beginPath(); ctx.arc(b.x + ox, b.y + oy, b.r * 0.62 * scale, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.shadowColor = 'transparent';
-    ctx.fillStyle = '#4ade80';
-    for (let i = 0; i < 4; i += 1) {
-      const a = i * 2.399 + b.x * 0.01;
-      const rr = b.r * (0.25 + (i % 4) * 0.15);
-      ctx.globalAlpha = 0.42;
-      ctx.beginPath();
-      ctx.arc(b.x + Math.cos(a) * rr * 0.55, b.y + Math.sin(a) * rr * 0.42, 4.2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    ctx.fillStyle = '#bbf7d0';
-    ctx.font = '10px Arial, sans-serif';
+    const r = b.r;
+    ctx.fillStyle = '#166534';
+    ctx.beginPath();
+    ctx.arc(b.x - r * 0.45, b.y + r * 0.2, r * 0.62, 0, TAU);
+    ctx.arc(b.x + r * 0.45, b.y + r * 0.2, r * 0.62, 0, TAU);
+    ctx.arc(b.x, b.y - r * 0.35, r * 0.66, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#22c55e';
+    ctx.beginPath();
+    ctx.arc(b.x - r * 0.3, b.y - r * 0.1, r * 0.28, 0, TAU);
+    ctx.arc(b.x + r * 0.32, b.y - r * 0.2, r * 0.24, 0, TAU);
+    ctx.arc(b.x, b.y + r * 0.3, r * 0.26, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(220, 252, 231, 0.85)';
+    ctx.font = 'bold 10px Arial, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('bush', b.x, b.y + 3);
-    ctx.restore();
+    ctx.textBaseline = 'middle';
+    ctx.fillText('bush', b.x, b.y + r * 0.05);
   }
 }
 
 function drawLanterns(ctx, world) {
-  for (const l of world.lanterns) {
-    ctx.strokeStyle = '#92400e';
-    ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(l.x, l.y + 12); ctx.lineTo(l.x, l.y - 9); ctx.stroke();
-    ctx.fillStyle = '#451a03';
-    roundRect(ctx, l.x - 6, l.y - 14, 12, 15, 3); ctx.fill();
-    const flicker = 1 + Math.sin(world.time * 7 + l.x * 0.07) * 0.12;
-    ctx.fillStyle = '#fde68a';
-    ctx.beginPath(); ctx.arc(l.x, l.y - 6, 4.4 * flicker, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#f59e0b';
-    ctx.beginPath(); ctx.arc(l.x, l.y + 12, 2, 0, Math.PI * 2); ctx.fill();
+  for (const L of world.lanterns) {
+    const glow = ctx.createRadialGradient(L.x, L.y, 2, L.x, L.y, 42);
+    glow.addColorStop(0, 'rgba(252, 211, 77, 0.5)');
+    glow.addColorStop(1, 'rgba(252, 211, 77, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(L.x, L.y, 42, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#92400e';
+    ctx.fillRect(L.x - 1.5, L.y - 14, 3, 8);
+    ctx.fillStyle = '#fcd34d';
+    roundRectPath(ctx, L.x - 6, L.y - 8, 12, 14, 4);
+    ctx.fill();
+    ctx.fillStyle = '#fef3c7';
+    ctx.fillRect(L.x - 3, L.y - 5, 6, 8);
   }
+}
+
+function drawPearlAndShrine(ctx, world) {
+  // Shrine pedestal.
+  ctx.fillStyle = '#334155';
+  roundRectPath(ctx, world.pearl.x - 22, world.pearl.y - 14, 44, 30, 6);
+  ctx.fill();
+  ctx.fillStyle = '#475569';
+  ctx.fillRect(world.pearl.x - 22, world.pearl.y - 14, 44, 6);
+  if (!world.hasPearl) {
+    const pulse = 1 + Math.sin(world.time * 3) * 0.12;
+    const glow = ctx.createRadialGradient(
+      world.pearl.x, world.pearl.y, 2,
+      world.pearl.x, world.pearl.y, 34 * pulse,
+    );
+    glow.addColorStop(0, 'rgba(165, 243, 252, 0.85)');
+    glow.addColorStop(1, 'rgba(165, 243, 252, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(world.pearl.x, world.pearl.y, 34 * pulse, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#ecfeff';
+    ctx.beginPath();
+    ctx.arc(world.pearl.x, world.pearl.y, world.pearl.r, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#67e8f9';
+    ctx.beginPath();
+    ctx.arc(world.pearl.x - 3, world.pearl.y - 3, 4, 0, TAU);
+    ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(165, 243, 252, 0.9)';
+  ctx.font = 'bold 10px Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('SHRINE', world.pearl.x, world.pearl.y + 30);
 }
 
 function drawExit(ctx, world) {
   const e = world.exit;
-  ctx.save();
   const open = world.hasPearl;
-  ctx.fillStyle = open ? 'rgba(74, 222, 128, 0.28)' : 'rgba(30, 41, 59, 0.88)';
-  roundRect(ctx, e.x, e.y, e.w, e.h, 7); ctx.fill();
-  ctx.strokeStyle = open ? COLORS.safe : '#64748b';
-  ctx.lineWidth = 3;
-  roundRect(ctx, e.x, e.y, e.w, e.h, 7); ctx.stroke();
-  ctx.strokeStyle = open ? '#bbf7d0' : '#94a3b8';
+  ctx.fillStyle = open ? '#14532d' : '#1e293b';
+  roundRectPath(ctx, e.x, e.y, e.w, e.h, 8);
+  ctx.fill();
+  ctx.strokeStyle = open ? '#4ade80' : '#64748b';
   ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(e.x + 12, e.y + e.h - 5); ctx.lineTo(e.x + 12, e.y + 16);
-  ctx.quadraticCurveTo(e.cx, e.y - 4, e.x + e.w - 12, e.y + 16);
-  ctx.lineTo(e.x + e.w - 12, e.y + e.h - 5);
+  roundRectPath(ctx, e.x + 1, e.y + 1, e.w - 2, e.h - 2, 7);
   ctx.stroke();
   if (open) {
-    ctx.fillStyle = 'rgba(187, 247, 208, 0.30)';
-    ctx.fillRect(e.cx - 3, e.y + 12, 6, e.h - 16);
+    const glow = ctx.createRadialGradient(e.cx, e.cy, 4, e.cx, e.cy, 44);
+    glow.addColorStop(0, 'rgba(74, 222, 128, 0.55)');
+    glow.addColorStop(1, 'rgba(74, 222, 128, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(e.cx, e.cy, 44, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#bbf7d0';
+    ctx.font = 'bold 12px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('OPEN GATE', e.cx, e.cy + 4);
   } else {
-    ctx.fillStyle = COLORS.gold;
-    roundRect(ctx, e.cx - 8, e.cy - 3, 16, 13, 3); ctx.fill();
-    ctx.strokeStyle = COLORS.gold; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(e.cx, e.cy - 3, 6, Math.PI, 0); ctx.stroke();
-    ctx.fillStyle = '#451a03';
-    ctx.beginPath(); ctx.arc(e.cx, e.cy + 3, 2.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 11px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('GATE', e.cx, e.cy + 4);
   }
-  ctx.fillStyle = open ? '#dcfce7' : COLORS.dim;
-  ctx.font = '700 11px Arial, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(open ? 'OPEN GATE' : 'EXIT', e.cx, e.y + e.h - 8);
-  ctx.restore();
 }
 
-function drawPearl(ctx, world) {
-  if (world.hasPearl) return;
-  const { x, y } = world.pearl;
-  ctx.save();
-  ctx.fillStyle = '#334155';
-  ctx.beginPath(); ctx.ellipse(x, y + 15, 24, 8, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#64748b';
-  roundRect(ctx, x - 13, y + 5, 26, 11, 3); ctx.fill();
-  const pulse = 1 + Math.sin(world.time * 3.2) * 0.10;
-  const glow = ctx.createRadialGradient(x, y, 2, x, y, 38 * pulse);
-  glow.addColorStop(0, 'rgba(165, 243, 252, 0.55)');
-  glow.addColorStop(1, 'rgba(165, 243, 252, 0)');
-  ctx.fillStyle = glow;
-  ctx.beginPath(); ctx.arc(x, y, 38 * pulse, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = COLORS.pearl;
-  ctx.beginPath(); ctx.arc(x, y, world.pearl.r * pulse, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath(); ctx.arc(x - 3.5, y - 4, 3.2, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = '#0e7490'; ctx.lineWidth = 1.4;
-  ctx.beginPath(); ctx.arc(x, y, world.pearl.r * pulse + 3, 0, Math.PI * 2); ctx.stroke();
-  ctx.fillStyle = '#cffafe';
-  ctx.font = '700 10px Arial, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('MOON-PEARL', x, y + 31);
-  ctx.restore();
-}
-
-function drawVision(ctx, world, guard) {
-  const steps = 26;
-  const points = [];
-  for (let i = 0; i <= steps; i += 1) {
-    const a = guard.angle - CONFIG.guardViewHalfAngle
-      + (i / steps) * CONFIG.guardViewHalfAngle * 2;
-    let len = CONFIG.guardViewDistance;
-    for (let d = 8; d <= CONFIG.guardViewDistance; d += 8) {
-      const px = guard.x + Math.cos(a) * d;
-      const py = guard.y + Math.sin(a) * d;
-      if (!hasLineOfSight(world, guard.x, guard.y, px, py)) { len = Math.max(8, d - 8); break; }
-      len = d;
-    }
-    points.push([guard.x + Math.cos(a) * len, guard.y + Math.sin(a) * len]);
-  }
-  ctx.save();
-  let fill = 'rgba(45, 212, 191, 0.14)';
-  if (guard.state === 'alert') fill = 'rgba(248, 113, 113, 0.30)';
-  else if (guard.state === 'suspicious') fill = 'rgba(252, 211, 77, 0.25)';
-  ctx.fillStyle = fill;
+function drawVisionCone(ctx, guard) {
+  const dist = CONFIG.guardViewDistance;
+  const half = CONFIG.guardViewHalfAngle;
+  const base = guard.color;
+  const alpha = guard.state === 'alert' ? 0.34 : guard.state === 'suspicious' ? 0.26 : 0.16;
+  ctx.fillStyle = hexA(base, alpha);
   ctx.beginPath();
   ctx.moveTo(guard.x, guard.y);
-  for (const [x, y] of points) ctx.lineTo(x, y);
+  ctx.arc(guard.x, guard.y, dist, guard.angle - half, guard.angle + half);
   ctx.closePath();
   ctx.fill();
-  ctx.strokeStyle = guard.state === 'alert' ? 'rgba(254, 202, 202, 0.42)' : 'rgba(204, 251, 241, 0.20)';
+  ctx.strokeStyle = hexA(base, 0.35);
   ctx.lineWidth = 1;
   ctx.stroke();
-  ctx.restore();
 }
 
-function drawGuard(ctx, world, guard) {
-  ctx.save();
-  ctx.translate(guard.x, guard.y);
-  ctx.fillStyle = 'rgba(0,0,0,0.30)';
-  ctx.beginPath(); ctx.ellipse(0, 11, 15, 5, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.rotate(guard.angle);
+function drawGuard(ctx, guard) {
+  drawVisionCone(ctx, guard);
+  // Body.
   ctx.fillStyle = guard.color;
-  ctx.beginPath(); ctx.arc(0, 0, guard.r, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = 'rgba(2, 6, 23, 0.65)'; ctx.lineWidth = 2; ctx.stroke();
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.28)';
-  ctx.beginPath(); ctx.arc(-3, -4, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath();
+  ctx.arc(guard.x, guard.y, guard.r, 0, TAU);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(2, 6, 23, 0.6)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // Face: two eyes looking along the facing angle.
+  const ex = Math.cos(guard.angle);
+  const ey = Math.sin(guard.angle);
+  const px = -ey;
+  const py = ex;
   ctx.fillStyle = '#0f172a';
   ctx.beginPath();
-  ctx.moveTo(guard.r + 7, 0); ctx.lineTo(guard.r - 3, -5); ctx.lineTo(guard.r - 3, 5);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#fffcc7';
-  ctx.beginPath(); ctx.arc(8, -10, 3.2, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath(); ctx.arc(5, -4, 3.4, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(-1, 4, 3.4, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#020617';
-  ctx.beginPath(); ctx.arc(6, -4, 1.5, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(0, 4, 1.5, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-
-  ctx.save();
-  ctx.translate(guard.x, guard.y);
-  ctx.fillStyle = 'rgba(2, 6, 23, 0.78)';
-  roundRect(ctx, -30, -34, 60, 12, 6); ctx.fill();
-  ctx.fillStyle = '#e0f2fe';
-  ctx.font = '700 7.5px Arial, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(guard.name.replace(' Keeper', '').toUpperCase(), 0, -25.5);
+  ctx.arc(guard.x + ex * 4 + px * 4, guard.y + ey * 4 + py * 4, 2.2, 0, TAU);
+  ctx.arc(guard.x + ex * 4 - px * 4, guard.y + ey * 4 - py * 4, 2.2, 0, TAU);
+  ctx.fill();
+  // Lantern dot on the chest.
+  ctx.fillStyle = '#fef3c7';
+  ctx.beginPath();
+  ctx.arc(guard.x + ex * 7, guard.y + ey * 7, 2.6, 0, TAU);
+  ctx.fill();
+  // Suspicion arc above the head.
   if (guard.suspicion > 0.02) {
-    ctx.fillStyle = 'rgba(2,6,23,0.78)';
-    roundRect(ctx, -19, 20, 38, 6, 3); ctx.fill();
-    ctx.fillStyle = guard.state === 'alert' ? COLORS.danger : (guard.state === 'suspicious' ? COLORS.gold : COLORS.safe);
-    roundRect(ctx, -18, 21, 38 * clamp(guard.suspicion, 0, 1), 4, 2); ctx.fill();
+    const col = guard.state === 'alert' ? COLORS.danger : COLORS.gold;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(guard.x, guard.y, guard.r + 7, -Math.PI / 2, -Math.PI / 2 + TAU * guard.suspicion);
+    ctx.stroke();
+    if (guard.state === 'alert') {
+      ctx.fillStyle = COLORS.danger;
+      ctx.font = 'bold 13px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('!', guard.x, guard.y - guard.r - 12);
+    }
   }
-  if (guard.state !== 'patrol') {
-    ctx.fillStyle = guard.state === 'alert' ? COLORS.danger : COLORS.gold;
-    ctx.font = '900 22px Arial, sans-serif';
-    ctx.fillText(guard.state === 'alert' ? '!!' : '!', 0, -40);
-  }
-  ctx.restore();
+  // Name tag.
+  ctx.fillStyle = 'rgba(226, 232, 240, 0.75)';
+  ctx.font = '9px Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(guard.name.toUpperCase(), guard.x, guard.y + guard.r + 13);
 }
 
-function drawFox(ctx, world) {
+function drawPlayer(ctx, world) {
   const p = world.player;
   ctx.save();
-  ctx.translate(p.x, p.y + (p.moving ? Math.sin(p.stepAcc * 0.32) * 1.1 : 0));
-  ctx.rotate(p.angle);
-  if (p.sneaking) ctx.scale(1.06, 0.84);
-  if (p.hidden) ctx.globalAlpha = 0.58;
-  ctx.fillStyle = 'rgba(0,0,0,0.30)';
-  ctx.beginPath(); ctx.ellipse(0, 10, 14, 5, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = '#c2410c'; ctx.lineWidth = 6; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(-10, 3); ctx.quadraticCurveTo(-20, 7, -24, 1); ctx.stroke();
-  ctx.strokeStyle = '#ffedd5'; ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.moveTo(-22, 2); ctx.lineTo(-25, 0); ctx.stroke();
-  ctx.fillStyle = COLORS.fox;
-  ctx.beginPath(); ctx.ellipse(0, 0, 14, 10.5, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = '#7c2d12'; ctx.lineWidth = 1.6; ctx.stroke();
+  ctx.translate(p.x, p.y);
+  // Tail.
+  ctx.fillStyle = '#ea580c';
   ctx.beginPath();
-  ctx.moveTo(5, -7); ctx.lineTo(10, -15); ctx.lineTo(14, -6);
-  ctx.moveTo(4, 7); ctx.lineTo(9, 14); ctx.lineTo(14, 6);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#ffedd5';
-  ctx.beginPath(); ctx.arc(9, 0, 7.4, 0, Math.PI * 2); ctx.fill();
+  ctx.ellipse(-p.r - 4, 4, 9, 5, 0.5, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = '#fdba74';
+  ctx.beginPath();
+  ctx.ellipse(-p.r - 8, 6, 4, 2.5, 0.5, 0, TAU);
+  ctx.fill();
+  // Body.
+  ctx.fillStyle = p.hidden ? hexA(COLORS.fox, 0.55) : COLORS.fox;
+  ctx.beginPath();
+  ctx.arc(0, 0, p.r, 0, TAU);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(124, 45, 18, 0.8)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // Ears.
   ctx.fillStyle = COLORS.fox;
-  ctx.beginPath(); ctx.arc(7, 0, 6.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(-7, -8);
+  ctx.lineTo(-10, -17);
+  ctx.lineTo(-3, -11);
+  ctx.closePath();
+  ctx.moveTo(7, -8);
+  ctx.lineTo(10, -17);
+  ctx.lineTo(3, -11);
+  ctx.closePath();
+  ctx.fill();
+  // Face.
+  const fx = p.moving ? Math.cos(p.angle) : 0;
+  const fy = p.moving ? Math.sin(p.angle) : 0;
   ctx.fillStyle = '#fff7ed';
-  ctx.beginPath(); ctx.ellipse(13.5, 0, 4.6, 3.4, 0, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#f11827';
-  ctx.beginPath(); ctx.arc(17.4, 0, 1.7, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(10, -3.2, 1.35, 0, Math.PI * 2); ctx.fill();
-  if (world.hasPearl) {
-    ctx.fillStyle = COLORS.pearl;
-    ctx.beginPath(); ctx.arc(-4, -10, 4.2, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath(); ctx.arc(-5.2, -11.4, 1.3, 0, Math.PI * 2); ctx.fill();
-  }
+  ctx.beginPath();
+  ctx.arc(fx * 3, fy * 3 + 2, 5, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = '#0f172a';
+  ctx.beginPath();
+  ctx.arc(fx * 4 - 3, fy * 4 - 2, 1.8, 0, TAU);
+  ctx.arc(fx * 4 + 3, fy * 4 - 2, 1.8, 0, TAU);
+  ctx.fill();
   ctx.restore();
-
   if (p.hidden) {
-    ctx.save();
-    ctx.translate(p.x, p.y - 10);
-    ctx.fillStyle = '#22c55e';
-    for (const [ox, oy, r] of [[-10, 0, 6], [0, -5, 7], [10, 0, 6]]) {
-      ctx.beginPath(); ctx.arc(ox, oy, r, 0, Math.PI * 2); ctx.fill();
-    }
-    ctx.fillStyle = '#dcfce7';
-    ctx.font = '700 9px Arial, sans-serif';
+    ctx.fillStyle = 'rgba(74, 222, 128, 0.9)';
+    ctx.font = 'bold 9px Arial, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('HIDDEN', 0, 16);
-    ctx.restore();
+    ctx.fillText('HIDDEN', p.x, p.y - p.r - 8);
   }
 }
 
 function drawParticles(ctx, world) {
-  for (const p of world.particles) {
-    ctx.save();
-    ctx.globalAlpha = 1 - p.life / p.maxLife;
-    ctx.fillStyle = p.color;
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
+  for (const pt of world.particles) {
+    const a = Math.max(0, 1 - pt.life / pt.maxLife);
+    ctx.fillStyle = hexA(pt.color, a);
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, pt.size, 0, TAU);
+    ctx.fill();
   }
 }
 
 function drawHud(ctx, world) {
-  ctx.save();
-  ctx.fillStyle = 'rgba(3, 10, 22, 0.96)';
+  ctx.fillStyle = '#0b1524';
   ctx.fillRect(0, 0, CONFIG.width, CONFIG.hudHeight);
+  ctx.strokeStyle = '#fcd34d';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, CONFIG.hudHeight);
+  ctx.lineTo(CONFIG.width, CONFIG.hudHeight);
+  ctx.stroke();
+  // Left: title.
   ctx.fillStyle = COLORS.gold;
-  ctx.fillRect(0, CONFIG.hudHeight - 2, CONFIG.width, 2);
+  ctx.font = 'bold 17px Arial, sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillStyle = COLORS.gold;
-  ctx.font = '900 17px Arial, sans-serif';
-  ctx.fillText('LANTERN FOX', 16, 20);
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('LANTERN FOX', 16, 21);
   ctx.fillStyle = COLORS.dim;
   ctx.font = '10px Arial, sans-serif';
-  ctx.fillText(world.player.sneaking ? 'PROWLING · quieter' : (world.player.hidden ? 'HIDDEN IN BUSH' : 'MOONLIT GARDEN'), 16, 36);
-
+  ctx.fillText('MOONLIT GARDEN', 16, 37);
+  // Center: objective / message.
+  const mid = world.hasPearl ? '◆ MOON-PEARL STOLEN ◆' : '◇ FIND THE MOON-PEARL ◇';
+  ctx.fillStyle = world.hasPearl ? COLORS.pearl : COLORS.ink;
+  ctx.font = 'bold 13px Arial, sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillStyle = COLORS.ink;
-  ctx.font = '700 14px Arial, sans-serif';
-  const objective = world.messageTime > 0 ? world.message
-    : (world.hasPearl ? 'Escape through the north-east gate' : 'Find the Moon-Pearl in the shrine');
-  ctx.fillText(objective, 480, 21);
-  ctx.fillStyle = world.hasPearl ? COLORS.pearl : COLORS.dim;
-  ctx.font = '700 10.5px Arial, sans-serif';
-  ctx.fillText(world.hasPearl ? '◆ MOON-PEARL STOLEN ◆' : '◇ pearl still in the shrine ◇', 480, 37);
-
-  ctx.textAlign = 'left';
+  ctx.fillText(mid, CONFIG.width / 2, 21);
+  const msg = world.messageTime > 0 ? world.message : '';
   ctx.fillStyle = COLORS.dim;
-  ctx.font = '700 10px Arial, sans-serif';
-  ctx.fillText('ALERT', 704, 17);
-  ctx.fillStyle = 'rgba(148,163,184,0.28)';
-  roundRect(ctx, 704, 23, 112, 9, 4); ctx.fill();
-  const alertColor = world.alert > 0.72 ? COLORS.danger : (world.alert > 0.3 ? COLORS.gold : COLORS.safe);
-  ctx.fillStyle = alertColor;
-  if (world.alert > 0.01) { roundRect(ctx, 704, 23, 112 * clamp(world.alert, 0, 1), 9, 4); ctx.fill(); }
-  ctx.fillStyle = world.seenBy ? COLORS.danger : COLORS.dim;
-  ctx.font = '700 10px Arial, sans-serif';
-  ctx.fillText(world.seenBy ? `SEEN × ${world.seenBy}` : 'UNSEEN', 704, 43);
-
-  ctx.textAlign = 'right';
+  ctx.font = '11px Arial, sans-serif';
+  ctx.fillText(msg, CONFIG.width / 2, 38);
+  // Right: alert meter + timer.
+  const alertW = 130;
+  const ax = CONFIG.width - alertW - 16;
+  ctx.fillStyle = COLORS.dim;
+  ctx.font = 'bold 10px Arial, sans-serif';
+  ctx.textAlign = 'left';
+  const label = world.alert >= 0.99 ? 'CAUGHT' : world.alert >= 0.32 ? 'SPOTTED' : world.alert > 0.02 ? 'SUSPICIOUS' : 'UNSEEN';
+  ctx.fillText('ALERT', ax, 14);
+  ctx.fillStyle = '#1e293b';
+  ctx.fillRect(ax, 18, alertW, 9);
+  const aw = alertW * Math.max(0, Math.min(1, world.alert));
+  ctx.fillStyle = world.alert >= 0.32 ? COLORS.danger : COLORS.safe;
+  ctx.fillRect(ax, 18, aw, 9);
   ctx.fillStyle = COLORS.ink;
-  ctx.font = '900 18px Arial, sans-serif';
-  ctx.fillText(formatTime(world.time), 944, 22);
+  ctx.font = 'bold 11px Arial, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(label, ax + alertW, 14);
+  ctx.fillStyle = COLORS.ink;
+  ctx.font = 'bold 15px Arial, sans-serif';
+  ctx.fillText(fmtTime(world.time), CONFIG.width - 16, 42);
   ctx.fillStyle = COLORS.dim;
   ctx.font = '10px Arial, sans-serif';
-  ctx.fillText('SHIFT prowl · R restart', 944, 37);
-  ctx.restore();
+  ctx.fillText('SHIFT prowl · R restart', CONFIG.width - 16, 14);
 }
 
 function drawTitle(ctx, world) {
-  ctx.save();
-  ctx.fillStyle = 'rgba(2, 6, 18, 0.58)';
+  ctx.fillStyle = 'rgba(3, 7, 18, 0.72)';
   ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
-  ctx.fillStyle = 'rgba(7, 20, 38, 0.96)';
-  roundRect(ctx, 142, 104, 676, 414, 18); ctx.fill();
-  ctx.strokeStyle = COLORS.gold; ctx.lineWidth = 2;
-  roundRect(ctx, 142, 104, 676, 414, 18); ctx.stroke();
-  ctx.strokeStyle = 'rgba(165,243,252,0.28)';
-  roundRect(ctx, 154, 116, 652, 390, 13); ctx.stroke();
-
-  ctx.textAlign = 'center';
-  ctx.fillStyle = COLORS.pearl;
-  ctx.beginPath(); ctx.arc(480, 157, 17, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath(); ctx.arc(474, 151, 5, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = COLORS.gold;
-  ctx.font = '900 55px Arial, sans-serif';
-  ctx.fillText('LANTERN FOX', 480, 224);
+  ctx.font = 'bold 54px Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('LANTERN FOX', CONFIG.width / 2, 210);
   ctx.fillStyle = COLORS.pearl;
-  ctx.font = '700 24px Arial, sans-serif';
-  ctx.fillText('Steal the Moon-Pearl', 480, 258);
+  ctx.font = 'bold 22px Arial, sans-serif';
+  ctx.fillText('— Steal the Moon-Pearl —', CONFIG.width / 2, 250);
   ctx.fillStyle = COLORS.ink;
   ctx.font = '15px Arial, sans-serif';
-  ctx.fillText('Slink past the Lantern Keepers, vanish into moon-bushes,', 480, 303);
-  ctx.fillText('snatch the pearl from its shrine, and escape north-east.', 480, 327);
+  ctx.fillText('Slip past the Lantern Keepers. Hide in the moon-bushes.', CONFIG.width / 2, 300);
+  ctx.fillText('Steal the pearl from its shrine, then escape through the north-east gate.', CONFIG.width / 2, 324);
   ctx.fillStyle = COLORS.dim;
-  ctx.font = '13.5px Arial, sans-serif';
-  ctx.fillText('WASD / Arrows to move · SHIFT to prowl quietly · R to restart', 480, 365);
-  ctx.fillText('Vision cones fill the alert eye. Red means a keeper is charging.', 480, 389);
+  ctx.font = '14px Arial, sans-serif';
+  ctx.fillText('WASD / Arrows to move · Hold Shift to prowl quietly · R to restart', CONFIG.width / 2, 372);
   ctx.fillStyle = COLORS.gold;
-  roundRect(ctx, 348, 421, 264, 50, 10); ctx.fill();
-  ctx.fillStyle = '#1c1005';
-  ctx.font = '900 17px Arial, sans-serif';
-  ctx.fillText('▶  START THE HEIST', 480, 453);
-  ctx.fillStyle = COLORS.dim;
-  ctx.font = '11px Arial, sans-serif';
-  ctx.fillText('Click anywhere or press Enter', 480, 496);
-  ctx.restore();
+  ctx.font = 'bold 18px Arial, sans-serif';
+  const blink = Math.floor(world.time * 2) % 2 === 0;
+  if (blink || world.time === 0) {
+    ctx.fillText('Click or press Enter to start', CONFIG.width / 2, 420);
+  }
 }
 
 function drawEnd(ctx, world) {
   const won = world.state === 'won';
-  ctx.save();
-  ctx.fillStyle = won ? 'rgba(4, 32, 20, 0.58)' : 'rgba(42, 5, 10, 0.62)';
+  ctx.fillStyle = won ? 'rgba(6, 40, 22, 0.78)' : 'rgba(60, 8, 8, 0.78)';
   ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
-  ctx.fillStyle = 'rgba(7, 20, 38, 0.97)';
-  roundRect(ctx, 258, 180, 444, 282, 16); ctx.fill();
-  ctx.strokeStyle = won ? COLORS.safe : COLORS.danger;
-  ctx.lineWidth = 2.5;
-  roundRect(ctx, 258, 180, 444, 282, 16); ctx.stroke();
-  ctx.textAlign = 'center';
-  if (won) {
-    ctx.fillStyle = COLORS.pearl;
-    ctx.beginPath(); ctx.arc(480, 225, 15, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath(); ctx.arc(475, 220, 4.5, 0, Math.PI * 2); ctx.fill();
-  }
-  ctx.fillStyle = won ? COLORS.gold : COLORS.danger;
-  ctx.font = '900 37px Arial, sans-serif';
-  ctx.fillText(won ? 'PEARL STOLEN!' : 'CAUGHT!', 480, 276);
-  ctx.fillStyle = COLORS.ink;
-  ctx.font = '16px Arial, sans-serif';
-  if (won) {
-    ctx.fillText('The little fox slips over the gate, moonlight in her teeth.', 480, 314);
-    ctx.fillText(`Escape time ${formatTime(world.time)} · The garden bells never rang.`, 480, 342);
-  } else {
-    ctx.fillText(`Caught by the ${world.caughtBy || 'Lantern Keeper'}.`, 480, 314);
-    ctx.fillText('The Moon-Pearl rolls back to its shrine… this time.', 480, 342);
-  }
   ctx.fillStyle = won ? COLORS.safe : COLORS.danger;
-  roundRect(ctx, 354, 380, 252, 46, 9); ctx.fill();
-  ctx.fillStyle = '#0b130c';
-  ctx.font = '900 15px Arial, sans-serif';
-  ctx.fillText(won ? '↻  STEAL IT AGAIN' : '↻  TRY AGAIN', 480, 407);
+  ctx.font = 'bold 44px Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(
+    won ? 'THE PEARL IS YOURS!' : 'CAUGHT!',
+    CONFIG.width / 2, 250,
+  );
+  ctx.fillStyle = COLORS.ink;
+  ctx.font = '18px Arial, sans-serif';
+  ctx.fillText(
+    won
+      ? 'You stole the Moon-Pearl in ' + fmtTime(world.time) + '. The garden is yours.'
+      : 'Caught by the ' + world.caughtBy + '. The lanterns never sleep.',
+    CONFIG.width / 2, 296,
+  );
   ctx.fillStyle = COLORS.dim;
-  ctx.font = '11px Arial, sans-serif';
-  ctx.fillText('Click or press R', 480, 443);
-  ctx.restore();
+  ctx.font = '15px Arial, sans-serif';
+  ctx.fillText('Press R to play again · Enter to restart', CONFIG.width / 2, 344);
 }
 
-export function drawGame(ctx, world, screen = 'game') {
-  ctx.save();
+export function drawGame(ctx, world, screen) {
   ctx.clearRect(0, 0, CONFIG.width, CONFIG.height);
-  drawFloor(ctx, world);
-  drawLanternGlow(ctx, world);
-  for (const s of world.solids) drawSolid(ctx, s);
+  drawBackground(ctx);
+  drawDecor(ctx, world);
+  drawSolids(ctx, world);
   drawBushes(ctx, world);
-  drawExit(ctx, world);
-  drawPearl(ctx, world);
-  for (const guard of world.guards) drawVision(ctx, world, guard);
   drawLanterns(ctx, world);
-  for (const guard of world.guards) drawGuard(ctx, world, guard);
-  drawFox(ctx, world);
+  drawPearlAndShrine(ctx, world);
+  drawExit(ctx, world);
+  for (const guard of world.guards) {
+    drawGuard(ctx, guard);
+  }
+  drawPlayer(ctx, world);
   drawParticles(ctx, world);
-
-  const vignette = ctx.createRadialGradient(480, 330, 230, 480, 330, 650);
-  vignette.addColorStop(0, 'rgba(0,0,0,0)');
-  vignette.addColorStop(1, 'rgba(0,0,0,0.34)');
-  ctx.fillStyle = vignette;
-  ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
-
+  drawHud(ctx, world);
   if (screen === 'title') {
     drawTitle(ctx, world);
-  } else {
-    drawHud(ctx, world);
-    if (world.state === 'won' || world.state === 'lost') drawEnd(ctx, world);
+  } else if (world.state === 'won' || world.state === 'lost') {
+    drawEnd(ctx, world);
   }
-  ctx.restore();
 }
