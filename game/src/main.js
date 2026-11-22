@@ -2,6 +2,7 @@ import { createWorld, stepWorld } from './world.js';
 import { drawGame } from './render.js';
 import { createInput, getMoveVector, consumeStart, consumeRestart } from './input.js';
 import { stageShot } from './shots.js';
+import { createFx, updateFx, drawFx } from './fx.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas ? canvas.getContext('2d') : null;
@@ -16,6 +17,7 @@ if (ctx && canvas) {
     drawGame(ctx, world, shot === 'start' ? 'title' : 'game');
   } else {
     const input = createInput(canvas);
+    const fx = createFx();
     let screen = 'title';
     let last = performance.now();
 
@@ -38,8 +40,10 @@ if (ctx && canvas) {
       if (screen === 'game') {
         stepWorld(world, getMoveVector(input), dt);
       }
+      updateFx(fx, dt);
 
       drawGame(ctx, world, screen);
+      drawFx(ctx, fx);
       requestAnimationFrame(frame);
     }
 
